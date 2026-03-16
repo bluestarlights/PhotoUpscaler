@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+_UPSCALER_CACHE = {}
 
 
 @dataclass
@@ -56,7 +57,10 @@ def gather_input_images(input_dir: str, uploaded_files) -> Tuple[List[Path], Opt
     return merged, folder, msg
 
 
-def build_upscaler(model_id: str):
+def get_upscaler(model_id: str):
+    if model_id in _UPSCALER_CACHE:
+        return _UPSCALER_CACHE[model_id], False
+
     import torch
     from transformers import AutoImageProcessor, Swin2SRForImageSuperResolution
 
@@ -67,7 +71,9 @@ def build_upscaler(model_id: str):
     model = Swin2SRForImageSuperResolution.from_pretrained(model_id, torch_dtype=dtype)
     model.to(device)
     model.eval()
-    return processor, model, device
+
+    _UPSCALER_CACHE[model_id] = (processor, model, device)
+    return _UPSCALER_CACHE[model_id], True
 
 
 def upscale_with_swin2sr(image: Image.Image, processor, model, device: str, target_long_edge: int) -> Image.Image:
@@ -133,9 +139,23 @@ def run_batch(input_dir, uploaded_files, output_dir, target_long_edge):
         return
 
     config = UpscaleConfig(output_dir=out_dir, target_long_edge=int(target_long_edge))
-    processor, model, device = build_upscaler(config.model_id)
-
     gallery = []
+
+    yield (
+        f"{prep_message}\n모델 로딩 중... (첫 실행은 Hugging Face 다운로드로 수 분 걸릴 수 있습니다)",
+        gallery,
+        None,
+    )
+
+    try:
+        (processor, model, device), cold_start = get_upscaler(config.model_id)
+    except Exception as exc:
+        yield f"모델 로딩 실패: {exc}", gallery, None
+        return
+
+    load_msg = "모델 초기 로딩 완료" if cold_start else "캐시된 모델 재사용"
+    yield f"{prep_message}\n{load_msg} / device={device}. 업스케일 시작합니다.", gallery, None
+
     for idx, img_path in enumerate(images, start=1):
         out_path = build_output_path(img_path, config.output_dir, folder_root)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +165,7 @@ def run_batch(input_dir, uploaded_files, output_dir, target_long_edge):
                 result = upscale_with_swin2sr(img, processor, model, device, config.target_long_edge)
                 result.save(out_path)
             gallery.append((str(out_path), f"완료: {img_path.name}"))
-            yield f"{prep_message}\n[{idx}/{len(images)}] 업스케일 완료: {img_path.name}", gallery, None
+            yield f"[{idx}/{len(images)}] 업스케일 완료: {img_path.name}", gallery, None
         except Exception as exc:
             yield f"[{idx}/{len(images)}] 실패: {img_path.name} ({exc})", gallery, None
 
@@ -164,6 +184,7 @@ def build_ui() -> gr.Blocks:
             - Python 최신 버전 호환 (basicsr/realesrgan 의존성 제거)
             - 폴더 스캔 + 다중 파일 업로드 배치 처리
             - Swin2SR 기반 업스케일 + ZIP 다운로드
+            - 첫 실행은 모델 다운로드 때문에 시간이 걸릴 수 있습니다.
             """
         )
 
@@ -175,7 +196,7 @@ def build_ui() -> gr.Blocks:
         target_long_edge = gr.Slider(2160, 6144, value=3840, step=64, label="목표 긴 변 해상도")
 
         run_btn = gr.Button("여러 사진 업스케일 시작", variant="primary")
-        log = gr.Textbox(label="진행 로그", lines=4)
+        log = gr.Textbox(label="진행 로그", lines=6)
         gallery = gr.Gallery(label="결과 미리보기", columns=4, height="auto")
         zip_file = gr.File(label="결과 ZIP 다운로드")
 
@@ -199,6 +220,8 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    print(f"[INFO] Open UI at: http://{args.host}:{args.port}")
+    print("[INFO] 로컬 PC에서 안 열리면 --inbrowser 옵션을 사용하세요.")
     ui = build_ui()
     ui.queue(default_concurrency_limit=1).launch(
         server_name=args.host,
