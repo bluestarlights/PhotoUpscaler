@@ -18,7 +18,14 @@ pip install -r requirements.txt
 python app.py
 ```
 
-브라우저: `http://localhost:7860`
+브라우저: `http://127.0.0.1:7860`
+
+
+## UI가 안 뜰 때
+- 로컬 PC 실행 시: `python app.py --host 127.0.0.1 --port 7860 --inbrowser`
+- 같은 PC 브라우저 주소: `http://127.0.0.1:7860`
+- Docker/원격 서버면 `--host 0.0.0.0`로 실행하고 포트(7860) 포워딩이 필요합니다.
+- 외부 접속 테스트가 필요하면 `--share` 옵션으로 임시 공개 링크를 만들 수 있습니다.
 
 ## 사용 방법
 1. `scan/` 폴더에 이미지들을 넣거나 UI에서 여러 파일을 업로드

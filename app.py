@@ -1,3 +1,4 @@
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -187,6 +188,21 @@ def build_ui() -> gr.Blocks:
     return demo
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="PhotoUpscaler 4K UI")
+    parser.add_argument("--host", default="127.0.0.1", help="Gradio bind host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=7860, help="Gradio bind port")
+    parser.add_argument("--share", action="store_true", help="Create a public Gradio share link")
+    parser.add_argument("--inbrowser", action="store_true", help="Open UI in browser automatically")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
     ui = build_ui()
-    ui.queue(default_concurrency_limit=1).launch(server_name="0.0.0.0", server_port=7860)
+    ui.queue(default_concurrency_limit=1).launch(
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        inbrowser=args.inbrowser,
+    )
