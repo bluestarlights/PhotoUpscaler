@@ -87,7 +87,7 @@ def upscale_with_swin2sr(image: Image.Image, processor, model, device: str, targ
     with torch.inference_mode():
         outputs = model(pixel_values)
 
-    out = outputs.reconstruction.data.squeeze().float().cpu().clamp_(0, 1).numpy()
+    out = outputs.reconstruction.detach().squeeze().float().cpu().clamp(0, 1).numpy()
     out = (out * 255.0).round().astype(np.uint8)
     out = np.transpose(out, (1, 2, 0))
     upscaled = Image.fromarray(out)
