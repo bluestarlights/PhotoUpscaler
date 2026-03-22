@@ -42,6 +42,22 @@ run_upscale.bat input.mp4 output_4k.mp4 --method lanczos
 
 추가 옵션은 그대로 뒤에 붙이면 됩니다.
 
+
+### 4) ComfyUI WebUI 실행 배치파일
+
+ComfyUI는 말씀하신 것처럼 WebUI 기반입니다. 아래 배치파일을 추가했습니다.
+
+```bat
+start_comfyui_webui.bat
+```
+
+동작:
+- `ComfyUI/main.py` 존재 여부 확인
+- `http://127.0.0.1:8188` 브라우저 자동 오픈
+- `python main.py --listen 127.0.0.1 --port 8188` 실행
+
+필요하면 `start_comfyui_webui.bat` 상단의 `COMFYUI_DIR`, `PYTHON_EXE`, `HOST`, `PORT` 값을 환경에 맞게 수정하세요.
+
 ## 블로그 기반 권장 운영 팁
 
 블로그에서 강조한 내용을 실제 운영 가이드로 정리하면:
