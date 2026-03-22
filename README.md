@@ -33,6 +33,15 @@ python upscaler.py input.mp4 output_4k_ai.mp4 \
   --realesrgan-model realesr-animevideov3
 ```
 
+
+### 3) Windows 배치파일로 실행
+
+```bat
+run_upscale.bat input.mp4 output_4k.mp4 --method lanczos
+```
+
+추가 옵션은 그대로 뒤에 붙이면 됩니다.
+
 ## 블로그 기반 권장 운영 팁
 
 블로그에서 강조한 내용을 실제 운영 가이드로 정리하면:
