@@ -1,13 +1,13 @@
-# PhotoUpscaler (4K) - Python 최신버전 호환
+# PhotoUpscaler (4K) - GPU 최적화
 
-`basicsr/realesrgan/gfpgan` 의존성을 제거하고, **Swin2SR(Transformers)** 기반으로 변경했습니다.
-이 구성은 Python 최신 버전(예: 3.12+)에서 상대적으로 설치 호환성이 좋습니다.
+`basicsr/realesrgan/gfpgan` 의존성을 제거하고, **Swin2SR(Transformers)** 기반으로 동작합니다.
+이번 수정에서는 **GPU 사용률/속도/품질 체감 개선**에 집중했습니다.
 
-## 핵심 기능
-- 폴더 일괄 처리 (`./scan` 재귀 검색)
-- 다중 업로드 배치 처리
-- 결과 미리보기 + ZIP 다운로드
-- 업스케일 모델: `caidas/swin2SR-classical-sr-x2-64`
+## 핵심 개선점
+- 기본 모델을 `Swin2SR x4 (Real-World)`로 변경 (기존 x2 대비 품질 개선)
+- CUDA 환경에서 `autocast(fp16)` 추론 적용
+- UI에서 디바이스를 `auto/cuda/cpu`로 직접 선택 가능
+- CPU fallback 시 진행 로그에 경고 표시
 
 ## 빠른 시작
 ```bash
@@ -15,30 +15,24 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
-python app.py
+python app.py --inbrowser
 ```
 
 브라우저: `http://127.0.0.1:7860`
 
-
-## UI가 안 뜰 때
-- 로컬 PC 실행 시: `python app.py --host 127.0.0.1 --port 7860 --inbrowser`
-- 같은 PC 브라우저 주소: `http://127.0.0.1:7860`
-- Docker/원격 서버면 `--host 0.0.0.0`로 실행하고 포트(7860) 포워딩이 필요합니다.
-- 외부 접속 테스트가 필요하면 `--share` 옵션으로 임시 공개 링크를 만들 수 있습니다.
+## 권장 설정 (RTX 5090)
+- 업스케일 모델: `Swin2SR x4 (Real-World, 권장)`
+- 추론 디바이스: `cuda`
+- 목표 긴 변: 기본 `3840`
 
 ## 사용 방법
-1. `scan/` 폴더에 이미지들을 넣거나 UI에서 여러 파일을 업로드
-2. 목표 긴 변 해상도(기본 3840) 설정
+1. `scan/` 폴더에 파일을 넣거나 UI에서 여러 파일 업로드
+2. 모델/디바이스 선택 (`cuda` 권장)
 3. `여러 사진 업스케일 시작` 클릭
-4. 완료 후 ZIP 다운로드
+4. 결과 미리보기 및 ZIP 다운로드
 
-## RTX 5090 팁
-- CUDA가 감지되면 GPU에서 추론합니다.
-- 첫 실행 시 Hugging Face 모델 다운로드가 필요합니다.
-
-
-## 버튼 클릭 후 반응이 없을 때
-- 첫 실행은 모델 다운로드/초기 로딩 때문에 시간이 걸립니다.
-- 이제 UI 로그에 `모델 로딩 중...` 메시지가 먼저 표시됩니다.
-- 로딩이 끝나면 `모델 초기 로딩 완료` 또는 `캐시된 모델 재사용` 메시지가 뜬 뒤 처리됩니다.
+## 트러블슈팅
+- UI 로그에 `device=cpu`가 뜨면 GPU를 못 쓰는 상태입니다.
+  - NVIDIA 드라이버/CUDA/PyTorch CUDA 빌드를 확인하세요.
+  - UI에서 디바이스를 `cuda`로 강제했는데 실패하면 CUDA 설정 문제입니다.
+- 첫 실행은 모델 다운로드 때문에 시간이 걸릴 수 있습니다.

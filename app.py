@@ -1,7 +1,7 @@
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import zipfile
 
 import gradio as gr
@@ -9,25 +9,33 @@ import numpy as np
 from PIL import Image
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-_UPSCALER_CACHE = {}
+
+# 품질/속도 목적의 추천 모델들
+MODEL_OPTIONS: Dict[str, str] = {
+    "Swin2SR x4 (Real-World, 권장)": "caidas/swin2SR-realworld-sr-x4-64-bsrgan-psnr",
+    "Swin2SR x4 (Compressed)": "caidas/swin2SR-compressed-sr-x4-64",
+    "Swin2SR x2 (Classical)": "caidas/swin2SR-classical-sr-x2-64",
+}
+
+_UPSCALER_CACHE: Dict[Tuple[str, str], Tuple[object, object, str]] = {}
 
 
 @dataclass
 class UpscaleConfig:
     output_dir: Path
     target_long_edge: int = 3840
-    model_id: str = "caidas/swin2SR-classical-sr-x2-64"
+    model_id: str = MODEL_OPTIONS["Swin2SR x4 (Real-World, 권장)"]
+    device_mode: str = "auto"  # auto | cuda | cpu
 
 
 def discover_images(root: Path) -> List[Path]:
-    return sorted(
-        [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS]
-    )
+    return sorted([p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS])
 
 
 def parse_uploaded_files(uploaded_files) -> List[Path]:
     if not uploaded_files:
         return []
+
     paths: List[Path] = []
     for file_item in uploaded_files:
         raw = getattr(file_item, "name", file_item)
@@ -57,23 +65,43 @@ def gather_input_images(input_dir: str, uploaded_files) -> Tuple[List[Path], Opt
     return merged, folder, msg
 
 
-def get_upscaler(model_id: str):
-    if model_id in _UPSCALER_CACHE:
-        return _UPSCALER_CACHE[model_id], False
+def resolve_device(device_mode: str) -> str:
+    import torch
+
+    if device_mode == "cpu":
+        return "cpu"
+
+    if device_mode == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("device=cuda 로 설정했지만 CUDA GPU를 찾지 못했습니다.")
+        return "cuda"
+
+    # auto
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def get_upscaler(model_id: str, device_mode: str):
+    cache_key = (model_id, device_mode)
+    if cache_key in _UPSCALER_CACHE:
+        return _UPSCALER_CACHE[cache_key], False
 
     import torch
     from transformers import AutoImageProcessor, Swin2SRForImageSuperResolution
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device(device_mode)
     dtype = torch.float16 if device == "cuda" else torch.float32
+
+    if device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     processor = AutoImageProcessor.from_pretrained(model_id)
     model = Swin2SRForImageSuperResolution.from_pretrained(model_id, torch_dtype=dtype)
     model.to(device)
     model.eval()
 
-    _UPSCALER_CACHE[model_id] = (processor, model, device)
-    return _UPSCALER_CACHE[model_id], True
+    _UPSCALER_CACHE[cache_key] = (processor, model, device)
+    return _UPSCALER_CACHE[cache_key], True
 
 
 def upscale_with_swin2sr(image: Image.Image, processor, model, device: str, target_long_edge: int) -> Image.Image:
@@ -81,17 +109,23 @@ def upscale_with_swin2sr(image: Image.Image, processor, model, device: str, targ
 
     rgb = image.convert("RGB")
     np_img = np.array(rgb)
+
     inputs = processor(images=np_img, return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device)
+    pixel_values = inputs["pixel_values"].to(device, non_blocking=True)
 
     with torch.inference_mode():
-        outputs = model(pixel_values)
+        if device == "cuda":
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                outputs = model(pixel_values)
+        else:
+            outputs = model(pixel_values)
 
     out = outputs.reconstruction.detach().squeeze().float().cpu().clamp(0, 1).numpy()
     out = (out * 255.0).round().astype(np.uint8)
     out = np.transpose(out, (1, 2, 0))
     upscaled = Image.fromarray(out)
 
+    # x4 모델을 사용해도 목표치보다 작으면 추가 확대
     current_long = max(upscaled.size)
     if current_long < target_long_edge:
         scale = target_long_edge / current_long
@@ -104,6 +138,7 @@ def upscale_with_swin2sr(image: Image.Image, processor, model, device: str, targ
 def ensure_unique_path(path: Path) -> Path:
     if not path.exists():
         return path
+
     idx = 1
     while True:
         candidate = path.with_name(f"{path.stem}_{idx}{path.suffix}")
@@ -122,6 +157,7 @@ def make_zip(output_dir: Path) -> Path:
     zip_path = output_dir / "upscaled_results.zip"
     if zip_path.exists():
         zip_path.unlink()
+
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in output_dir.rglob("*"):
             if p.is_file() and p != zip_path:
@@ -129,7 +165,7 @@ def make_zip(output_dir: Path) -> Path:
     return zip_path
 
 
-def run_batch(input_dir, uploaded_files, output_dir, target_long_edge):
+def run_batch(input_dir, uploaded_files, output_dir, target_long_edge, model_name, device_mode):
     out_dir = Path(output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -138,23 +174,37 @@ def run_batch(input_dir, uploaded_files, output_dir, target_long_edge):
         yield prep_message, [], None
         return
 
-    config = UpscaleConfig(output_dir=out_dir, target_long_edge=int(target_long_edge))
-    gallery = []
+    model_id = MODEL_OPTIONS[model_name]
+    config = UpscaleConfig(
+        output_dir=out_dir,
+        target_long_edge=int(target_long_edge),
+        model_id=model_id,
+        device_mode=device_mode,
+    )
 
+    gallery = []
     yield (
-        f"{prep_message}\n모델 로딩 중... (첫 실행은 Hugging Face 다운로드로 수 분 걸릴 수 있습니다)",
+        f"{prep_message}\n모델 로딩 중... (첫 실행은 모델 다운로드로 수 분 걸릴 수 있습니다)",
         gallery,
         None,
     )
 
     try:
-        (processor, model, device), cold_start = get_upscaler(config.model_id)
+        (processor, model, device), cold_start = get_upscaler(config.model_id, config.device_mode)
     except Exception as exc:
         yield f"모델 로딩 실패: {exc}", gallery, None
         return
 
-    load_msg = "모델 초기 로딩 완료" if cold_start else "캐시된 모델 재사용"
-    yield f"{prep_message}\n{load_msg} / device={device}. 업스케일 시작합니다.", gallery, None
+    model_msg = "모델 초기 로딩 완료" if cold_start else "캐시된 모델 재사용"
+    device_warn = ""
+    if device == "cpu":
+        device_warn = "\n[경고] 현재 CPU 모드입니다. 매우 느리고 품질 체감이 떨어질 수 있습니다. device='cuda'를 선택하세요."
+
+    yield (
+        f"{prep_message}\n{model_msg}\nmodel={config.model_id}\ndevice={device}{device_warn}",
+        gallery,
+        None,
+    )
 
     for idx, img_path in enumerate(images, start=1):
         out_path = build_output_path(img_path, config.output_dir, folder_root)
@@ -177,14 +227,13 @@ def build_ui() -> gr.Blocks:
     default_in = str((Path.cwd() / "scan").resolve())
     default_out = str((Path.cwd() / "output_4k").resolve())
 
-    with gr.Blocks(title="PhotoUpscaler 4K (Python 최신버전 호환)") as demo:
+    with gr.Blocks(title="PhotoUpscaler 4K (GPU 최적화)") as demo:
         gr.Markdown(
             """
             # 📸 PhotoUpscaler (4K)
-            - Python 최신 버전 호환 (basicsr/realesrgan 의존성 제거)
-            - 폴더 스캔 + 다중 파일 업로드 배치 처리
-            - Swin2SR 기반 업스케일 + ZIP 다운로드
-            - 첫 실행은 모델 다운로드 때문에 시간이 걸릴 수 있습니다.
+            - **권장 모델:** Swin2SR x4 Real-World
+            - GPU 사용률/속도 개선: CUDA autocast(fp16) 적용
+            - 폴더 스캔 + 다중 업로드 + ZIP 다운로드
             """
         )
 
@@ -193,16 +242,28 @@ def build_ui() -> gr.Blocks:
             output_dir = gr.Textbox(label="출력 폴더", value=default_out)
 
         upload_files = gr.Files(label="추가 업로드(여러 장 선택 가능)", file_count="multiple")
-        target_long_edge = gr.Slider(2160, 6144, value=3840, step=64, label="목표 긴 변 해상도")
+
+        with gr.Row():
+            target_long_edge = gr.Slider(2160, 6144, value=3840, step=64, label="목표 긴 변 해상도")
+            model_name = gr.Dropdown(
+                choices=list(MODEL_OPTIONS.keys()),
+                value="Swin2SR x4 (Real-World, 권장)",
+                label="업스케일 모델",
+            )
+            device_mode = gr.Dropdown(
+                choices=["auto", "cuda", "cpu"],
+                value="auto",
+                label="추론 디바이스",
+            )
 
         run_btn = gr.Button("여러 사진 업스케일 시작", variant="primary")
-        log = gr.Textbox(label="진행 로그", lines=6)
+        log = gr.Textbox(label="진행 로그", lines=8)
         gallery = gr.Gallery(label="결과 미리보기", columns=4, height="auto")
         zip_file = gr.File(label="결과 ZIP 다운로드")
 
         run_btn.click(
             fn=run_batch,
-            inputs=[input_dir, upload_files, output_dir, target_long_edge],
+            inputs=[input_dir, upload_files, output_dir, target_long_edge, model_name, device_mode],
             outputs=[log, gallery, zip_file],
         )
 
@@ -221,7 +282,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     print(f"[INFO] Open UI at: http://{args.host}:{args.port}")
-    print("[INFO] 로컬 PC에서 안 열리면 --inbrowser 옵션을 사용하세요.")
+    print("[INFO] GPU를 강제로 쓰려면 UI에서 추론 디바이스를 'cuda'로 선택하세요.")
     ui = build_ui()
     ui.queue(default_concurrency_limit=1).launch(
         server_name=args.host,
